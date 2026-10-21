@@ -134,11 +134,55 @@ def expand_uploads(files):
     return pdfs,errs
 
 def summarize(master):
-    if master.empty:return pd.DataFrame(),pd.DataFrame()
-    nok=master[master.Resultado.eq('Nok')]; n=master.Pieza.nunique(); bad=nok.Pieza.nunique();good=max(n-bad,0)
-    s=pd.DataFrame({'Indicador':['Piezas analizadas','Piezas OK','Piezas NOK','FTQ %','Rechazo %','Mediciones','Mediciones NOK','Mediciones NOK %'], 'Valor':[n,good,bad,100*good/n if n else 0,100*bad/n if n else 0,len(master),len(nok),100*len(nok)/len(master) if len(master) else 0]})
-    reg=nok[nok.Caracteristica.eq('(5) 301-400 UPR')]; per=nok.groupby('Pieza').Caracteristica.agg(lambda x:set(x)).to_dict(); ps=set(reg.Pieza.unique())
-    rs=pd.DataFrame({'Indicador':['Piezas con REG 5 NOK','Solo REG 5','REG 5 + otras características','REG 5 NOK en Base Circle','REG 5 NOK en Lift Area'], 'Valor':[len(ps),sum(per.get(p,set())=={'(5) 301-400 UPR'} for p in ps),sum(len(per.get(p,set()))>1 for p in ps),reg[reg.Area.eq('Base Circle')].Pieza.nunique(),reg[reg.Area.eq('Lift Area')].Pieza.nunique()]})
+    """Resumen ejecutivo ampliado, conservando los indicadores y desgloses del archivo original."""
+    if master.empty:
+        return pd.DataFrame(columns=['Metrica','Valor']), pd.DataFrame(columns=['Indicador','Valor'])
+    nok=master[master.Resultado.eq('Nok')]
+    n=master.Pieza.nunique(); bad=nok.Pieza.nunique(); good=max(n-bad,0)
+    total=len(master); nok_meas=len(nok); ok_meas=total-nok_meas
+    # El original contaba las piezas NOK por componente, uniendo dimensional y chatter.
+    ap_dim=master[(master.Area.eq('Apoyos')) & master.Resultado.eq('Nok')].Pieza.nunique()
+    ap_chat=master[(master.Area.eq('Chatter apoyos')) & master.Resultado.eq('Nok')].Pieza.nunique()
+    lev_dim=master[(master.Area.eq('Levas')) & master.Resultado.eq('Nok')].Pieza.nunique()
+    lev_chat=master[(master.Area.isin(['Base Circle','Lift Area'])) & master.Resultado.eq('Nok')].Pieza.nunique()
+    ap_total=set(master[(master.Area.isin(['Apoyos','Chatter apoyos'])) & master.Resultado.eq('Nok')].Pieza.unique())
+    lev_total=set(master[(master.Area.isin(['Levas','Base Circle','Lift Area'])) & master.Resultado.eq('Nok')].Pieza.unique())
+    regchar='(5) 301-400 UPR'
+    reg=nok[nok.Caracteristica.eq(regchar)]
+    nok_chars=nok.groupby('Pieza').Caracteristica.agg(lambda x:set(x)).to_dict()
+    reg_pieces=set(reg.Pieza.unique())
+    reg_only=sum(nok_chars.get(piece,set())=={regchar} for piece in reg_pieces)
+    reg_with_other=sum(len(nok_chars.get(piece,set()))>1 for piece in reg_pieces)
+    # Preserve original executive metrics and add useful measurement-level indicators.
+    metrics=[
+      ('Total de piezas analizadas',n),
+      ('Piezas con resultado OK (todas las caracterist. OK)',good),
+      ('Piezas con resultado NOK (al menos una caracterist. NOK)',bad),
+      ('Porcentaje de Rechazo',round(100*bad/n,2) if n else 0),
+      ('FTQ (First Time Quality)',round(100*good/n,2) if n else 0),
+      ('Total de características/mediciones analizadas',total),
+      ('Características con resultado OK',ok_meas),
+      ('Características con resultado NOK',nok_meas),
+      ('% Características OK',round(100*ok_meas/total,2) if total else 0),
+      ('% Características NOK',round(100*nok_meas/total,2) if total else 0),
+      ('--- DESGLOSE DE RECHAZOS POR COMPONENTE ---',''),
+      ('Piezas con fallas en APOYOS (Total)',len(ap_total)),
+      ('  -> Rechazo Dimensional (Pestaña Apoyos)',ap_dim),
+      ('  -> Rechazo por Chatter (Pestaña Chatter apoyos)',ap_chat),
+      ('Piezas con fallas en LEVAS (Total)',len(lev_total)),
+      ('  -> Rechazo Dimensional (Pestaña Levas)',lev_dim),
+      ('  -> Rechazo por Chatter (Pestaña chatter Levas)',lev_chat),
+      ('--- DETALLE ESPECÍFICO REG 5 ---',''),
+      (f'Cantidad piezas rechazadas SOLO por "{regchar}"',reg_only),
+      (f'Cantidad piezas rechazadas por "{regchar}" Y otra característica',reg_with_other),
+      (f'Cantidad piezas rechazadas SOLO por "{regchar}" en Lift Area',master[(master.Pieza.isin([p for p in reg_pieces if nok_chars.get(p,set())=={regchar}])) & master.Caracteristica.eq(regchar) & master.Area.eq('Lift Area') & master.Resultado.eq('Nok')].Pieza.nunique()),
+      (f'Cantidad piezas rechazadas SOLO por "{regchar}" en Base Circle',master[(master.Pieza.isin([p for p in reg_pieces if nok_chars.get(p,set())=={regchar}])) & master.Caracteristica.eq(regchar) & master.Area.eq('Base Circle') & master.Resultado.eq('Nok')].Pieza.nunique()),
+      ('Total de mediciones NOK',nok_meas),
+      ('Porcentaje de mediciones NOK',round(100*nok_meas/total,2) if total else 0),
+    ]
+    s=pd.DataFrame(metrics,columns=['Metrica','Valor'])
+    rs=pd.DataFrame({'Indicador':['Piezas con REG 5 NOK','Solo REG 5','REG 5 + otras características','REG 5 NOK en Base Circle','REG 5 NOK en Lift Area'],
+                     'Valor':[len(reg_pieces),reg_only,reg_with_other,reg[reg.Area.eq('Base Circle')].Pieza.nunique(),reg[reg.Area.eq('Lift Area')].Pieza.nunique()]})
     return s,rs
 
 def capability(master):
@@ -175,29 +219,76 @@ def make_excel(dfs,master,caps,summary,reg,errors):
                 ws.column_dimensions[col[0].column_letter].width=min(38,max(12,max((len(str(c.value)) for c in list(col)[:250] if c.value is not None),default=12)+2))
     b.seek(0);return b.getvalue()
 
-def make_pdf(master,summary,reg,caps):
-    b=io.BytesIO();doc=SimpleDocTemplate(b,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=12*mm)
-    styles=getSampleStyleSheet();styles.add(ParagraphStyle(name='EngicomTitle',parent=styles['Title'],fontSize=21,textColor=colors.HexColor('#15324B'),alignment=TA_CENTER))
-    story=[Paragraph('ENGICOM | REPORTE DE CALIDAD NoK',styles['EngicomTitle']),Paragraph('Dashboard ejecutivo · '+datetime.now().strftime('%Y-%m-%d %H:%M:%S'),styles['Normal']),Spacer(1,5*mm)]
-    def addtable(df,limit=18):
-        if df.empty:return
-        v=df.head(limit).copy().replace({np.nan:'—'});data=[list(map(str,v.columns))]+[[str(x)[:55] for x in r] for r in v.to_numpy().tolist()]
-        t=Table(data,repeatRows=1,hAlign='LEFT');t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#15324B')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),.25,colors.HexColor('#CBD5E1')),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F1F5F9')]),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-        story.extend([t,Spacer(1,4*mm)])
-    story.append(Paragraph('Indicadores ejecutivos',styles['Heading2']));addtable(summary)
-    story.append(Paragraph('REG 5 · Base Circle / Lift Area',styles['Heading2']));addtable(reg)
-    nok=master[master.Resultado.eq('Nok')]
-    if not nok.empty:
-        top=nok.groupby('Caracteristica').Pieza.nunique().sort_values(ascending=False).head(12).sort_values()
-        fig,ax=plt.subplots(figsize=(10,4));sns.barplot(x=top.values,y=top.index,ax=ax,color='#137C8B');ax.set_title('Pareto · Piezas NOK por característica');ax.set_xlabel('Piezas únicas afectadas');ax.set_ylabel('');fig.tight_layout()
-        im=io.BytesIO();fig.savefig(im,format='png',dpi=150,bbox_inches='tight');plt.close(fig);im.seek(0);story.append(Image(im,width=245*mm,height=98*mm))
-        story.append(Paragraph('Pp / Ppk por área y característica',styles['Heading2']));addtable(caps,20)
-        char=nok.Caracteristica.value_counts().index[0];g=master[master.Caracteristica.eq(char)].dropna(subset=['Medicion']).sort_values('Pieza').head(250)
-        if not g.empty:
-            fig,ax=plt.subplots(figsize=(10,3.3));sns.boxplot(data=g,x='Area',y='Medicion',ax=ax,color='#A7C7D7');sns.stripplot(data=g,x='Area',y='Medicion',ax=ax,color='#15324B',size=2,alpha=.55)
-            ax.set_title(f'Distribución de mediciones · {char}');fig.tight_layout();im=io.BytesIO();fig.savefig(im,format='png',dpi=140,bbox_inches='tight');plt.close(fig);im.seek(0);story.append(Image(im,width=245*mm,height=82*mm))
-    story.append(Spacer(1,3*mm));story.append(Paragraph('Pp/Ppk son indicadores descriptivos calculados con desviación estándar global muestral. No demuestran estabilidad del proceso ni sustituyen un estudio de capacidad aprobado.',styles['Italic']))
+def make_pdf(master,summary,reg,caps,topn=15):
+    """Exporta a PDF el conjunto de gráficas que se generan en las pestañas del dashboard."""
+    b=io.BytesIO()
+    doc=SimpleDocTemplate(b,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=10*mm,bottomMargin=10*mm)
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='EngicomTitle',parent=styles['Title'],fontSize=21,textColor=colors.HexColor('#15324B'),alignment=TA_CENTER,spaceAfter=5))
+    styles.add(ParagraphStyle(name='ChartHeading',parent=styles['Heading2'],fontSize=13,textColor=colors.HexColor('#15324B'),spaceBefore=5,spaceAfter=5))
+    story=[Paragraph('ENGICOM | REPORTE DE CALIDAD NoK',styles['EngicomTitle']),Paragraph('Dashboard ejecutivo completo · '+datetime.now().strftime('%Y-%m-%d %H:%M:%S'),styles['Normal']),Spacer(1,4*mm)]
+    def addtable(df,limit=None):
+        if df is None or df.empty:return
+        v=df.copy() if limit is None else df.head(limit).copy()
+        v=v.replace({np.nan:'—'}); data=[list(map(str,v.columns))]+[[str(x)[:70] for x in r] for r in v.to_numpy().tolist()]
+        t=Table(data,repeatRows=1,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#15324B')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),.25,colors.HexColor('#CBD5E1')),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F1F5F9')]),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
+        story.extend([t,Spacer(1,3*mm)])
+    def addfig(fig,width=245*mm,height=105*mm):
+        im=io.BytesIO();fig.savefig(im,format='png',dpi=145,bbox_inches='tight',facecolor='white');plt.close(fig);im.seek(0)
+        story.append(Image(im,width=width,height=height));story.append(Spacer(1,3*mm))
+    def addplotly_pie(good,bad):
+        fig,ax=plt.subplots(figsize=(7.4,3.6)); vals=[good,bad]
+        if sum(vals): ax.pie(vals,labels=['OK','NOK'],autopct='%1.1f%%',startangle=90,colors=['#159A80','#D9485F'],wedgeprops={'width':.42,'edgecolor':'white'})
+        else: ax.text(.5,.5,'Sin piezas',ha='center',va='center')
+        ax.set_title('Resultado por pieza');addfig(fig,175*mm,85*mm)
+    def add_pareto(df,col,title):
+        d=df[df.Resultado.eq('Nok')].groupby(col).Pieza.nunique().sort_values(ascending=False).head(topn)
+        fig,ax=plt.subplots(figsize=(10,4.2))
+        if d.empty:ax.text(.5,.5,'No se detectaron registros NOK',ha='center',va='center');ax.set_axis_off()
+        else:
+            sns.barplot(x=d.values,y=d.index.astype(str),ax=ax,color='#137C8B')
+            ax.set_xlabel('Piezas únicas NOK');ax.set_ylabel('');ax.set_title(title)
+            total=d.sum();ax2=ax.twiny();ax2.plot(d.values.cumsum()/total*100,range(len(d)),color='#E09F3E',marker='o');ax2.set_xlim(0,110);ax2.set_xlabel('% acumulado')
+        fig.tight_layout();addfig(fig)
+    nok=master[master.Resultado.eq('Nok')]; pieces=master.Pieza.nunique();bad=nok.Pieza.nunique();good=max(pieces-bad,0)
+    story.append(Paragraph('1. Resumen ejecutivo',styles['Heading1']))
+    addtable(summary)
+    addplotly_pie(good,bad)
+    add_pareto(master,'Caracteristica',f'Pareto por característica · Top {topn}')
+    story.append(Paragraph('2. Resultado por pieza y Pareto',styles['Heading1']))
+    add_pareto(master,'Pieza',f'Pareto por pieza · Top {topn}')
+    for area in sorted(master.Area.dropna().astype(str).unique()):
+        add_pareto(master[master.Area.astype(str).eq(area)],f'Caracteristica',f'Pareto por característica · {area} · Top {topn}')
+    story.append(Paragraph('3. Indicadores REG 5 · Base Circle / Lift Area',styles['Heading1']));addtable(reg)
+    story.append(Paragraph('4. Distribución, cajas e histogramas por característica',styles['Heading1']))
+    for ch in sorted(master.Caracteristica.dropna().astype(str).unique()):
+        g=master[master.Caracteristica.astype(str).eq(ch)].dropna(subset=['Medicion']).copy()
+        if g.empty:continue
+        fig,ax=plt.subplots(figsize=(10,4))
+        sns.boxplot(data=g,x='Area',y='Medicion',ax=ax,color='#A7C7D7')
+        sns.stripplot(data=g,x='Area',y='Medicion',ax=ax,color='#15324B',size=2,alpha=.45)
+        for field,label,color in [('Min','LSL','#D97706'),('Max','USL','#DC2626')]:
+            vals=g[field].dropna()
+            if not vals.empty:ax.axhline(vals.iloc[0],linestyle='--',color=color,label=label)
+        ax.set_title(f'Boxplot y valores individuales · {ch}');ax.set_xlabel('Área');ax.set_ylabel('Medición')
+        if ax.get_legend_handles_labels()[0]:ax.legend(loc='best')
+        fig.tight_layout();addfig(fig)
+        fig,ax=plt.subplots(figsize=(10,3.7))
+        sns.histplot(data=g,x='Medicion',hue='Area',kde=False,bins=40,element='step',stat='count',common_norm=False,ax=ax)
+        ax.set_title(f'Histograma de mediciones · {ch}');ax.set_xlabel('Medición');ax.set_ylabel('Frecuencia');fig.tight_layout();addfig(fig)
+    story.append(Paragraph('5. Resumen de capacidad Pp / Ppk',styles['Heading1']));addtable(caps)
+    valid=caps.dropna(subset=['Ppk']).copy() if caps is not None and not caps.empty else pd.DataFrame()
+    if not valid.empty:
+        valid['Grupo']=valid.Area.astype(str)+' · '+valid.Caracteristica.astype(str)
+        valid=valid.sort_values('Ppk')
+        fig,ax=plt.subplots(figsize=(10,max(4,min(11,.28*len(valid)+1))))
+        sns.barplot(data=valid,x='Ppk',y='Grupo',ax=ax,hue='Ppk',palette='RdYlGn',legend=False)
+        ax.axvline(1.33,linestyle='--',color='#15324B',label='Referencia 1.33');ax.set_title('Ppk por área y característica');ax.set_xlabel('Ppk');ax.set_ylabel('');ax.legend()
+        fig.tight_layout();addfig(fig)
+    story.append(Paragraph('Pp/Ppk son indicadores descriptivos calculados con desviación estándar global muestral. No demuestran estabilidad del proceso ni sustituyen un estudio de capacidad aprobado. Los límites deben validarse contra la especificación controlada vigente.',styles['Italic']))
     doc.build(story);b.seek(0);return b.getvalue()
+
 def main():
     st.title('📊 Reporte NoK | ENGICOM')
     st.caption('Calidad dimensional y chatter · Pareto · distribución · Pp/Ppk · detalle por pieza · Excel y PDF')
@@ -275,7 +366,7 @@ def main():
         st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');st.dataframe(v,use_container_width=True,hide_index=True,height=480)
         st.subheader('Registros NOK');st.dataframe(nok,use_container_width=True,hide_index=True,height=300)
     with tabs[5]:
-        stamp=datetime.now().strftime('%Y%m%d_%H%M%S');xlsx=make_excel(dfs,master,caps,summary,reg,errors);pdf=make_pdf(master,summary,reg,caps)
+        stamp=datetime.now().strftime('%Y%m%d_%H%M%S');xlsx=make_excel(dfs,master,caps,summary,reg,errors);pdf=make_pdf(master,summary,reg,caps,topn=topn)
         x,y=st.columns(2)
         x.download_button('⬇️ Descargar Excel completo',xlsx,file_name=f'Engicom_Reporte_NoK_{stamp}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
         y.download_button('⬇️ Descargar dashboard PDF',pdf,file_name=f'Engicom_Dashboard_NoK_{stamp}.pdf',mime='application/pdf',use_container_width=True)
