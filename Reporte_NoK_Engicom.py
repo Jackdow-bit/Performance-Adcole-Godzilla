@@ -165,14 +165,14 @@ def summarize(master):
       ('Características con resultado NOK',nok_meas),
       ('% Características OK',round(100*ok_meas/total,2) if total else 0),
       ('% Características NOK',round(100*nok_meas/total,2) if total else 0),
-      ('--- DESGLOSE DE RECHAZOS POR COMPONENTE ---',''),
+      ('--- DESGLOSE DE RECHAZOS POR COMPONENTE ---',None),
       ('Piezas con fallas en APOYOS (Total)',len(ap_total)),
       ('  -> Rechazo Dimensional (Pestaña Apoyos)',ap_dim),
       ('  -> Rechazo por Chatter (Pestaña Chatter apoyos)',ap_chat),
       ('Piezas con fallas en LEVAS (Total)',len(lev_total)),
       ('  -> Rechazo Dimensional (Pestaña Levas)',lev_dim),
       ('  -> Rechazo por Chatter (Pestaña chatter Levas)',lev_chat),
-      ('--- DETALLE ESPECÍFICO REG 5 ---',''),
+      ('--- DETALLE ESPECÍFICO REG 5 ---',None),
       (f'Cantidad piezas rechazadas SOLO por "{regchar}"',reg_only),
       (f'Cantidad piezas rechazadas por "{regchar}" Y otra característica',reg_with_other),
       (f'Cantidad piezas rechazadas SOLO por "{regchar}" en Lift Area',master[(master.Pieza.isin([p for p in reg_pieces if nok_chars.get(p,set())=={regchar}])) & master.Caracteristica.eq(regchar) & master.Area.eq('Lift Area') & master.Resultado.eq('Nok')].Pieza.nunique()),
@@ -300,7 +300,7 @@ def main():
         st.info('Carga reportes PDF individuales o un ZIP con PDF para comenzar.')
         st.markdown('**Incluye:** extracción por pieza, identificación del archivo, OK/NOK, Pareto, boxplots, valores individuales, Pp/Ppk y exportaciones Excel/PDF.')
         return
-    if st.button('🚀 Procesar reportes',type='primary',use_container_width=True):
+    if st.button('🚀 Procesar reportes',type='primary',width='stretch'):
         pdfs,errors=expand_uploads(uploads)
         if not pdfs:st.error('No se encontraron PDF válidos.');return
         records={k:[] for k in ['Apoyos','Levas','chatter Levas','Chatter apoyos','Chatter Journal Ford']};prog=st.progress(0);msg=st.empty()
@@ -320,7 +320,7 @@ def main():
     master=d['master'];dfs=d['dfs'];summary=d['summary'];reg=d['reg'];caps=d['caps'];errors=d['errors']
     if master.empty:
         st.warning('No se extrajeron mediciones. Revisa que los PDF contengan texto seleccionable y las secciones MAIN JOURNALS, LOBES y CHATTER.')
-        if errors:st.dataframe(pd.DataFrame(errors),use_container_width=True)
+        if errors:st.dataframe(pd.DataFrame(errors),width='stretch')
         return
     nok=master[master.Resultado.eq('Nok')];pieces=master.Pieza.nunique();bad=nok.Pieza.nunique();good=pieces-bad
     a,b,c,e,f=st.columns(5);a.metric('Piezas analizadas',f'{pieces:,}');b.metric('Piezas OK',f'{good:,}');c.metric('Piezas NOK',f'{bad:,}');e.metric('FTQ',f'{100*good/pieces:.2f}%');f.metric('Mediciones NOK',f'{len(nok):,}')
@@ -328,17 +328,21 @@ def main():
     with tabs[0]:
         l,r=st.columns([1,1.2])
         with l:
-            fig=go.Figure(data=[go.Pie(labels=['OK','NOK'],values=[good,bad],hole=.62,marker_colors=['#159A80','#D9485F'])]);fig.update_layout(title='Resultado por pieza',height=360,margin=dict(t=55,b=10));st.plotly_chart(fig,use_container_width=True)
+            fig=go.Figure(data=[go.Pie(labels=['OK','NOK'],values=[good,bad],hole=.62,marker_colors=['#159A80','#D9485F'])]);fig.update_layout(title='Resultado por pieza',height=360,margin=dict(t=55,b=10));st.plotly_chart(fig,width='stretch')
         with r:
-            st.subheader('Resumen ejecutivo');st.dataframe(summary.round(3),use_container_width=True,hide_index=True)
-            st.subheader('REG 5 · (5) 301–400 UPR');st.dataframe(reg,use_container_width=True,hide_index=True)
+            st.subheader('Resumen ejecutivo')
+            summary_view=summary.copy()
+            # Evita mezclar números y cadenas vacías en Valor: PyArrow no puede inferir un tipo numérico único.
+            summary_view['Valor']=summary_view['Valor'].map(lambda value: '' if pd.isna(value) else str(value))
+            st.dataframe(summary_view, width='stretch', hide_index=True)
+            st.subheader('REG 5 · (5) 301–400 UPR');st.dataframe(reg,width='stretch',hide_index=True)
         st.subheader('Piezas con más mediciones NOK')
         pp=nok.groupby(['Pieza','Nombre del archivo']).agg(**{'Mediciones NOK':('Caracteristica','size'),'Características NOK':('Caracteristica',lambda s:', '.join(sorted(set(s))))}).reset_index().sort_values('Mediciones NOK',ascending=False)
-        st.dataframe(pp.head(100),use_container_width=True,hide_index=True)
+        st.dataframe(pp.head(100),width='stretch',hide_index=True)
     with tabs[1]:
-        st.plotly_chart(pareto(master,'Caracteristica',f'Pareto por característica · Top {topn}',topn),use_container_width=True)
-        st.plotly_chart(pareto(master,'Pieza',f'Pareto por pieza · Top {topn}',topn),use_container_width=True)
-        area=st.selectbox('Área',sorted(master.Area.dropna().astype(str).unique()));st.plotly_chart(pareto(master[master.Area.eq(area)],'Caracteristica',f'Pareto · {area}',topn),use_container_width=True)
+        st.plotly_chart(pareto(master,'Caracteristica',f'Pareto por característica · Top {topn}',topn),width='stretch')
+        st.plotly_chart(pareto(master,'Pieza',f'Pareto por pieza · Top {topn}',topn),width='stretch')
+        area=st.selectbox('Área',sorted(master.Area.dropna().astype(str).unique()));st.plotly_chart(pareto(master[master.Area.eq(area)],'Caracteristica',f'Pareto · {area}',topn),width='stretch')
     with tabs[2]:
         chars=sorted(master.Caracteristica.dropna().astype(str).unique());ch=st.selectbox('Característica',chars);df=master[master.Caracteristica.eq(ch)].dropna(subset=['Medicion'])
         if not df.empty:
@@ -346,31 +350,31 @@ def main():
             for col,label,color in [('Min','LSL','#D97706'),('Max','USL','#DC2626')]:
                 z=df[col].dropna()
                 if not z.empty:fig.add_hline(y=z.iloc[0],line_dash='dash',line_color=color,annotation_text=label)
-            st.plotly_chart(fig,use_container_width=True)
-            st.plotly_chart(px.histogram(df,x='Medicion',color='Area',marginal='box',nbins=40,title=f'Histograma · {ch}',opacity=.75),use_container_width=True)
-            st.dataframe(df[['Pieza','Nombre del archivo','Area','Leva','Apoyo','Medicion','Min','Max','Resultado']],use_container_width=True,hide_index=True)
+            st.plotly_chart(fig,width='stretch')
+            st.plotly_chart(px.histogram(df,x='Medicion',color='Area',marginal='box',nbins=40,title=f'Histograma · {ch}',opacity=.75),width='stretch')
+            st.dataframe(df[['Pieza','Nombre del archivo','Area','Leva','Apoyo','Medicion','Min','Max','Resultado']],width='stretch',hide_index=True)
         else:st.info('Sin mediciones numéricas para esta característica.')
     with tabs[3]:
         st.caption('Pp/Ppk calculados con desviación estándar global muestral. No demuestran estabilidad; 1.33 es solo una referencia común, no un criterio aprobado aquí.')
         areas=['Todas']+sorted(caps.Area.dropna().astype(str).unique());af=st.selectbox('Filtrar área para capacidad',areas)
         cv=caps if af=='Todas' else caps[caps.Area.eq(af)]
-        st.dataframe(cv.round(6),use_container_width=True,hide_index=True)
+        st.dataframe(cv.round(6),width='stretch',hide_index=True)
         valid=cv.dropna(subset=['Ppk']).copy()
         if not valid.empty:
             valid['Grupo']=valid.Area.astype(str)+' · '+valid.Caracteristica.astype(str)
-            fig=px.bar(valid.sort_values('Ppk'),x='Ppk',y='Grupo',orientation='h',color='Ppk',color_continuous_scale='RdYlGn',title='Ppk por característica');fig.add_vline(x=1.33,line_dash='dash',line_color='#15324B');fig.update_layout(height=max(420,len(valid)*25));st.plotly_chart(fig,use_container_width=True)
+            fig=px.bar(valid.sort_values('Ppk'),x='Ppk',y='Grupo',orientation='h',color='Ppk',color_continuous_scale='RdYlGn',title='Ppk por característica');fig.add_vline(x=1.33,line_dash='dash',line_color='#15324B');fig.update_layout(height=max(420,len(valid)*25));st.plotly_chart(fig,width='stretch')
     with tabs[4]:
         filt=st.multiselect('Resultado', ['Ok','Nok'],default=['Ok','Nok']);search=st.text_input('Buscar pieza o nombre de PDF')
         v=master[master.Resultado.isin(filt)].copy()
         if search:v=v[v.Pieza.astype(str).str.contains(search,case=False,na=False)|v['Nombre del archivo'].astype(str).str.contains(search,case=False,na=False)]
-        st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');st.dataframe(v,use_container_width=True,hide_index=True,height=480)
-        st.subheader('Registros NOK');st.dataframe(nok,use_container_width=True,hide_index=True,height=300)
+        st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');st.dataframe(v,width='stretch',hide_index=True,height=480)
+        st.subheader('Registros NOK');st.dataframe(nok,width='stretch',hide_index=True,height=300)
     with tabs[5]:
         stamp=datetime.now().strftime('%Y%m%d_%H%M%S');xlsx=make_excel(dfs,master,caps,summary,reg,errors);pdf=make_pdf(master,summary,reg,caps,topn=topn)
         x,y=st.columns(2)
-        x.download_button('⬇️ Descargar Excel completo',xlsx,file_name=f'Engicom_Reporte_NoK_{stamp}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
-        y.download_button('⬇️ Descargar dashboard PDF',pdf,file_name=f'Engicom_Dashboard_NoK_{stamp}.pdf',mime='application/pdf',use_container_width=True)
+        x.download_button('⬇️ Descargar Excel completo',xlsx,file_name=f'Engicom_Reporte_NoK_{stamp}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width='stretch')
+        y.download_button('⬇️ Descargar dashboard PDF',pdf,file_name=f'Engicom_Dashboard_NoK_{stamp}.pdf',mime='application/pdf',width='stretch')
         st.write('Excel: hojas individuales por familia, Master, Nok, Resumen ejecutivo, Resumen REG 5 y Pp_Ppk.')
-        if errors:st.warning(f'Incidencias en {len(errors)} archivo(s).');st.dataframe(pd.DataFrame(errors),use_container_width=True)
+        if errors:st.warning(f'Incidencias en {len(errors)} archivo(s).');st.dataframe(pd.DataFrame(errors),width='stretch')
 
 if __name__=='__main__':main()
