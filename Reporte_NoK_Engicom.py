@@ -20,6 +20,21 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 
+def safe_dataframe(df, **kwargs):
+    """Renderiza tablas evitando errores Arrow por columnas con tipos mixtos."""
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    view = df.copy()
+    for col in view.columns:
+        series = view[col]
+        if series.dtype == 'object':
+            values = series.dropna()
+            has_number = values.map(lambda x: isinstance(x, (int, float, np.integer, np.floating)) and not isinstance(x, (bool, np.bool_))).any()
+            has_text = values.map(lambda x: isinstance(x, str)).any()
+            if has_number and has_text:
+                view[col] = series.map(lambda x: '' if pd.isna(x) else str(x))
+    st.dataframe(view, **kwargs)
+
 st.set_page_config(page_title='Reporte NoK | Engicom', page_icon='📊', layout='wide')
 st.markdown('''<style>.block-container{padding-top:1.1rem;max-width:1600px}[data-testid="stMetric"]{background:#f2f6fa;border:1px solid #dce5ee;padding:14px;border-radius:12px}h1,h2,h3{letter-spacing:-.02em}</style>''', unsafe_allow_html=True)
 COLS=['Nombre del archivo','Pieza','Leva','Apoyo','Caracteristica','Medicion','Area','Resultado','Min','Max']
@@ -320,7 +335,7 @@ def main():
     master=d['master'];dfs=d['dfs'];summary=d['summary'];reg=d['reg'];caps=d['caps'];errors=d['errors']
     if master.empty:
         st.warning('No se extrajeron mediciones. Revisa que los PDF contengan texto seleccionable y las secciones MAIN JOURNALS, LOBES y CHATTER.')
-        if errors:st.dataframe(pd.DataFrame(errors),width='stretch')
+        if errors:safe_dataframe(pd.DataFrame(errors),width='stretch')
         return
     nok=master[master.Resultado.eq('Nok')];pieces=master.Pieza.nunique();bad=nok.Pieza.nunique();good=pieces-bad
     a,b,c,e,f=st.columns(5);a.metric('Piezas analizadas',f'{pieces:,}');b.metric('Piezas OK',f'{good:,}');c.metric('Piezas NOK',f'{bad:,}');e.metric('FTQ',f'{100*good/pieces:.2f}%');f.metric('Mediciones NOK',f'{len(nok):,}')
@@ -334,11 +349,11 @@ def main():
             summary_view=summary.copy()
             # Evita mezclar números y cadenas vacías en Valor: PyArrow no puede inferir un tipo numérico único.
             summary_view['Valor']=summary_view['Valor'].map(lambda value: '' if pd.isna(value) else str(value))
-            st.dataframe(summary_view, width='stretch', hide_index=True)
-            st.subheader('REG 5 · (5) 301–400 UPR');st.dataframe(reg,width='stretch',hide_index=True)
+            safe_dataframe(summary_view, width='stretch', hide_index=True)
+            st.subheader('REG 5 · (5) 301–400 UPR');safe_dataframe(reg,width='stretch',hide_index=True)
         st.subheader('Piezas con más mediciones NOK')
         pp=nok.groupby(['Pieza','Nombre del archivo']).agg(**{'Mediciones NOK':('Caracteristica','size'),'Características NOK':('Caracteristica',lambda s:', '.join(sorted(set(s))))}).reset_index().sort_values('Mediciones NOK',ascending=False)
-        st.dataframe(pp.head(100),width='stretch',hide_index=True)
+        safe_dataframe(pp.head(100),width='stretch',hide_index=True)
     with tabs[1]:
         st.plotly_chart(pareto(master,'Caracteristica',f'Pareto por característica · Top {topn}',topn),width='stretch')
         st.plotly_chart(pareto(master,'Pieza',f'Pareto por pieza · Top {topn}',topn),width='stretch')
@@ -352,13 +367,13 @@ def main():
                 if not z.empty:fig.add_hline(y=z.iloc[0],line_dash='dash',line_color=color,annotation_text=label)
             st.plotly_chart(fig,width='stretch')
             st.plotly_chart(px.histogram(df,x='Medicion',color='Area',marginal='box',nbins=40,title=f'Histograma · {ch}',opacity=.75),width='stretch')
-            st.dataframe(df[['Pieza','Nombre del archivo','Area','Leva','Apoyo','Medicion','Min','Max','Resultado']],width='stretch',hide_index=True)
+            safe_dataframe(df[['Pieza','Nombre del archivo','Area','Leva','Apoyo','Medicion','Min','Max','Resultado']],width='stretch',hide_index=True)
         else:st.info('Sin mediciones numéricas para esta característica.')
     with tabs[3]:
         st.caption('Pp/Ppk calculados con desviación estándar global muestral. No demuestran estabilidad; 1.33 es solo una referencia común, no un criterio aprobado aquí.')
         areas=['Todas']+sorted(caps.Area.dropna().astype(str).unique());af=st.selectbox('Filtrar área para capacidad',areas)
         cv=caps if af=='Todas' else caps[caps.Area.eq(af)]
-        st.dataframe(cv.round(6),width='stretch',hide_index=True)
+        safe_dataframe(cv.round(6),width='stretch',hide_index=True)
         valid=cv.dropna(subset=['Ppk']).copy()
         if not valid.empty:
             valid['Grupo']=valid.Area.astype(str)+' · '+valid.Caracteristica.astype(str)
@@ -367,14 +382,14 @@ def main():
         filt=st.multiselect('Resultado', ['Ok','Nok'],default=['Ok','Nok']);search=st.text_input('Buscar pieza o nombre de PDF')
         v=master[master.Resultado.isin(filt)].copy()
         if search:v=v[v.Pieza.astype(str).str.contains(search,case=False,na=False)|v['Nombre del archivo'].astype(str).str.contains(search,case=False,na=False)]
-        st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');st.dataframe(v,width='stretch',hide_index=True,height=480)
-        st.subheader('Registros NOK');st.dataframe(nok,width='stretch',hide_index=True,height=300)
+        st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');safe_dataframe(v,width='stretch',hide_index=True,height=480)
+        st.subheader('Registros NOK');safe_dataframe(nok,width='stretch',hide_index=True,height=300)
     with tabs[5]:
         stamp=datetime.now().strftime('%Y%m%d_%H%M%S');xlsx=make_excel(dfs,master,caps,summary,reg,errors);pdf=make_pdf(master,summary,reg,caps,topn=topn)
         x,y=st.columns(2)
         x.download_button('⬇️ Descargar Excel completo',xlsx,file_name=f'Engicom_Reporte_NoK_{stamp}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width='stretch')
         y.download_button('⬇️ Descargar dashboard PDF',pdf,file_name=f'Engicom_Dashboard_NoK_{stamp}.pdf',mime='application/pdf',width='stretch')
         st.write('Excel: hojas individuales por familia, Master, Nok, Resumen ejecutivo, Resumen REG 5 y Pp_Ppk.')
-        if errors:st.warning(f'Incidencias en {len(errors)} archivo(s).');st.dataframe(pd.DataFrame(errors),width='stretch')
+        if errors:st.warning(f'Incidencias en {len(errors)} archivo(s).');safe_dataframe(pd.DataFrame(errors),width='stretch')
 
 if __name__=='__main__':main()
