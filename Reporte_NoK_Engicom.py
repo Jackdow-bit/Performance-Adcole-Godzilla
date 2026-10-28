@@ -130,23 +130,50 @@ def parse_pdf(name,blob,piece):
                             fc=ford[ch]; r=row(name,piece,None,apoyo,fc,v,'Chatter Journal Ford','cf');out['Chatter Journal Ford'].append(r)
     return out,None
 
-def expand_uploads(files):
-    pdfs=[];errs=[];seen=set()
+def count_pdf_candidates(files):
+    """Cuenta PDFs sin descomprimir ni guardar todos los documentos a la vez."""
+    total=0
     for f in files:
         try:
-            blob=f.getvalue(); candidates=[]
-            if f.name.lower().endswith('.pdf'):candidates=[(f.name,blob)]
+            if f.name.lower().endswith('.pdf'):
+                total += 1
             else:
-                with zipfile.ZipFile(io.BytesIO(blob)) as z:
+                with zipfile.ZipFile(f) as z:
+                    total += sum(1 for info in z.infolist()
+                                 if not info.is_dir() and info.filename.lower().endswith('.pdf'))
+        except Exception:
+            # El error detallado se registra durante la lectura.
+            total += 0
+    return max(total, 1)
+
+def iter_upload_pdfs(files, errors):
+    """Entrega un PDF por vez; evita mantener una lista de 1,200 bytes descomprimidos."""
+    seen=set()
+    for f in files:
+        try:
+            if f.name.lower().endswith('.pdf'):
+                candidates=((f.name, f.getvalue()),)
+                for name, data in candidates:
+                    digest=hashlib.sha256(data).digest()
+                    if digest not in seen:
+                        seen.add(digest)
+                        yield name, data
+            else:
+                with zipfile.ZipFile(f) as z:
                     for info in z.infolist():
-                        if not info.is_dir() and info.filename.lower().endswith('.pdf'):
-                            try:candidates.append((Path(info.filename).name,z.read(info)))
-                            except Exception as e:errs.append({'Archivo':info.filename,'Error':str(e)})
-            for name,data in candidates:
-                h=hashlib.sha256(data).hexdigest()
-                if h not in seen:seen.add(h);pdfs.append((name,data))
-        except Exception as e:errs.append({'Archivo':f.name,'Error':str(e)})
-    return pdfs,errs
+                        if info.is_dir() or not info.filename.lower().endswith('.pdf'):
+                            continue
+                        try:
+                            data=z.read(info)
+                            digest=hashlib.sha256(data).digest()
+                            if digest not in seen:
+                                seen.add(digest)
+                                yield Path(info.filename).name, data
+                            del data
+                        except Exception as e:
+                            errors.append({'Archivo':info.filename,'Error':str(e)})
+        except Exception as e:
+            errors.append({'Archivo':f.name,'Error':str(e)})
 
 def summarize(master):
     """Resumen ejecutivo ampliado, conservando los indicadores y desgloses del archivo original."""
@@ -316,20 +343,35 @@ def main():
         st.markdown('**Incluye:** extracción por pieza, identificación del archivo, OK/NOK, Pareto, boxplots, valores individuales, Pp/Ppk y exportaciones Excel/PDF.')
         return
     if st.button('🚀 Procesar reportes',type='primary',width='stretch'):
-        pdfs,errors=expand_uploads(uploads)
-        if not pdfs:st.error('No se encontraron PDF válidos.');return
-        records={k:[] for k in ['Apoyos','Levas','chatter Levas','Chatter apoyos','Chatter Journal Ford']};prog=st.progress(0);msg=st.empty()
-        for i,(name,blob) in enumerate(pdfs,1):
-            msg.write(f'Procesando {i:,}/{len(pdfs):,}: {name}')
-            extracted,err=parse_pdf(name,blob,i)
-            if err:errors.append({'Archivo':name,'Error':err})
-            for k,v in extracted.items():records[k].extend(v)
-            prog.progress(i/len(pdfs))
+        errors=[]
+        total=count_pdf_candidates(uploads)
+        if total <= 0:
+            st.error('No se encontraron PDF.'); return
+        records={k:[] for k in ['Apoyos','Levas','chatter Levas','Chatter apoyos','Chatter Journal Ford']}
+        prog=st.progress(0);msg=st.empty();processed=0
+        for name,blob in iter_upload_pdfs(uploads,errors):
+            processed += 1
+            msg.write(f'Procesando {processed:,} PDF · {name}')
+            try:
+                extracted,err=parse_pdf(name,blob,processed)
+                if err: errors.append({'Archivo':name,'Error':err})
+                for k,v in extracted.items(): records[k].extend(v)
+            finally:
+                del blob
+            prog.progress(min(processed/total,1.0))
+            if processed % 25 == 0:
+                # Reduce objetos temporales entre bloques; no altera resultados.
+                import gc
+                gc.collect()
+        if processed == 0:
+            st.error('No se encontraron PDF válidos. Revisa los archivos y ZIP.'); return
         dfs={k:pd.DataFrame(v,columns=COLS) for k,v in records.items()}
-        mainkeys=['Apoyos','Levas','chatter Levas','Chatter apoyos'];master=pd.concat([dfs[k] for k in mainkeys if not dfs[k].empty],ignore_index=True) if any(not dfs[k].empty for k in mainkeys) else pd.DataFrame(columns=COLS)
+        del records
+        mainkeys=['Apoyos','Levas','chatter Levas','Chatter apoyos']
+        master=pd.concat([dfs[k] for k in mainkeys if not dfs[k].empty],ignore_index=True) if any(not dfs[k].empty for k in mainkeys) else pd.DataFrame(columns=COLS)
         summary,reg=summarize(master);caps=capability(master)
-        st.session_state['engicom_nok']={'dfs':dfs,'master':master,'summary':summary,'reg':reg,'caps':caps,'errors':errors,'pdfs':len(pdfs)}
-        msg.success(f'Procesamiento terminado: {len(pdfs):,} PDF únicos.')
+        st.session_state['engicom_nok']={'dfs':dfs,'master':master,'summary':summary,'reg':reg,'caps':caps,'errors':errors,'pdfs':processed}
+        msg.success(f'Procesamiento terminado: {processed:,} PDF únicos.')
     d=st.session_state.get('engicom_nok')
     if not d:return
     master=d['master'];dfs=d['dfs'];summary=d['summary'];reg=d['reg'];caps=d['caps'];errors=d['errors']
@@ -385,10 +427,21 @@ def main():
         st.caption(f'{len(v):,} mediciones · {v.Pieza.nunique():,} piezas');safe_dataframe(v,width='stretch',hide_index=True,height=480)
         st.subheader('Registros NOK');safe_dataframe(nok,width='stretch',hide_index=True,height=300)
     with tabs[5]:
-        stamp=datetime.now().strftime('%Y%m%d_%H%M%S');xlsx=make_excel(dfs,master,caps,summary,reg,errors);pdf=make_pdf(master,summary,reg,caps,topn=topn)
+        st.write('Genera cada exportación solo cuando la solicites para evitar consumir memoria durante el análisis.')
+        stamp=datetime.now().strftime('%Y%m%d_%H%M%S')
+        if st.button('Preparar Excel completo'):
+            with st.spinner('Generando Excel...'):
+                st.session_state['engicom_xlsx']=make_excel(dfs,master,caps,summary,reg,errors)
+                st.session_state['engicom_xlsx_name']=f'Engicom_Reporte_NoK_{stamp}.xlsx'
+        if st.button('Preparar dashboard PDF'):
+            with st.spinner('Generando PDF y gráficas; puede tardar unos minutos...'):
+                st.session_state['engicom_pdf']=make_pdf(master,summary,reg,caps,topn=topn)
+                st.session_state['engicom_pdf_name']=f'Engicom_Dashboard_NoK_{stamp}.pdf'
         x,y=st.columns(2)
-        x.download_button('⬇️ Descargar Excel completo',xlsx,file_name=f'Engicom_Reporte_NoK_{stamp}.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width='stretch')
-        y.download_button('⬇️ Descargar dashboard PDF',pdf,file_name=f'Engicom_Dashboard_NoK_{stamp}.pdf',mime='application/pdf',width='stretch')
+        if st.session_state.get('engicom_xlsx'):
+            x.download_button('⬇️ Descargar Excel completo',st.session_state['engicom_xlsx'],file_name=st.session_state.get('engicom_xlsx_name','Engicom_Reporte_NoK.xlsx'),mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',width='stretch')
+        if st.session_state.get('engicom_pdf'):
+            y.download_button('⬇️ Descargar dashboard PDF',st.session_state['engicom_pdf'],file_name=st.session_state.get('engicom_pdf_name','Engicom_Dashboard_NoK.pdf'),mime='application/pdf',width='stretch')
         st.write('Excel: hojas individuales por familia, Master, Nok, Resumen ejecutivo, Resumen REG 5 y Pp_Ppk.')
         if errors:st.warning(f'Incidencias en {len(errors)} archivo(s).');safe_dataframe(pd.DataFrame(errors),width='stretch')
 
